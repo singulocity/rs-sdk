@@ -186,3 +186,87 @@ test('loaded unchanged zones skip writes, new zones and private events retain de
     player.buildArea.activeZones.clear(); player.updateZones();
     expect(player.buildArea.loadedZones.size).toBe(0);
 });
+
+const originalNow = Date.now;
+
+test('inspection is opt-in, independent of area, throttled, and does not create inventories', () => {
+    const now = mock(Date.now);
+    Date.now = now;
+    now.mockReturnValue(10000);
+    try {
+        const player = addPlayer(30, 3210, 3210);
+        player.levels[8] = 7;
+        player.baseLevels[8] = 6;
+        player.stats[8] = 15000;
+        const v = viewer();
+        const other = viewer();
+        expect(JSON.parse(v.sent[0]).inspect).toBe(true);
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: 'FEED30' }));
+        cycleWorldFeed();
+        expect(v.last()).toMatchObject({ t: 'inspect', name: 'feed30', player: { name: 'Feed30', inventory: Array(28).fill(null) } });
+        expect(v.last().player.skills.find((s: any) => s.id === 8)).toMatchObject({ level: 7, baseLevel: 6, xp: 1500 });
+        expect(v.last().player.skills).toHaveLength(19);
+        expect(player.invs.size).toBe(0);
+        expect(other.sent).toHaveLength(1);
+        const sent = v.sent.length;
+        cycleWorldFeed();
+        expect(v.sent).toHaveLength(sent);
+        now.mockReturnValue(11000);
+        player.visibility = Visibility.HARD;
+        cycleWorldFeed();
+        expect(v.last().player).toBeNull();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: null }));
+        now.mockReturnValue(12000);
+        cycleWorldFeed();
+        expect(v.sent).toHaveLength(sent + 1);
+    } finally {
+        Date.now = originalNow;
+    }
+});
+
+test('inspection preserves slots and counts, uses real XP units, and tracks names across slot reuse', async () => {
+    const { spyOn } = await import('bun:test');
+    const { Inventory } = await import('../../src/engine/Inventory.js');
+    const { default: InvType } = await import('../../src/cache/config/InvType.js');
+    const { default: ObjType } = await import('../../src/cache/config/ObjType.js');
+    const { getExpByLevel } = await import('../../src/engine/entity/Player.js');
+    const getItem = spyOn(ObjType, 'get').mockReturnValue({ name: 'Logs' } as any);
+    const now = mock(() => 20000);
+    Date.now = now;
+    try {
+        const player = addPlayer(40, 3210, 3210);
+        const inv = new Inventory(InvType.INV, 28);
+        inv.items[3] = { id: 1511, count: 25 };
+        player.invs.set(InvType.INV, inv);
+        player.baseLevels[8] = 6;
+        player.levels[8] = 7;
+        player.stats[8] = 15000;
+        const v = viewer();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: 'Feed40' }));
+        cycleWorldFeed();
+        expect(v.last().player.inventory[0]).toBeNull();
+        expect(v.last().player.inventory[3]).toEqual({ id: 1511, count: 25, name: 'Logs' });
+        expect(v.last().player.skills.find((s: any) => s.id === 8)).toEqual({
+            id: 8, name: 'Woodcutting', level: 7, baseLevel: 6, xp: 1500,
+            levelXp: getExpByLevel(6) / 10, nextLevelXp: getExpByLevel(7) / 10
+        });
+        expect(inv.update).toBe(false);
+        expect(inv.dirtySlots.size).toBe(0);
+        player.unlink();
+        const replacement = addPlayer(41, 3210, 3210);
+        replacement.slot = 40;
+        now.mockReturnValue(21000);
+        cycleWorldFeed();
+        expect(v.last().player).toBeNull();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: 'Feed41' }));
+        cycleWorldFeed();
+        expect(v.last().player.name).toBe('Feed41');
+        const count = v.sent.length;
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: { bad: true } }));
+        cycleWorldFeed();
+        expect(v.sent).toHaveLength(count);
+    } finally {
+        Date.now = originalNow;
+        getItem.mockRestore();
+    }
+});

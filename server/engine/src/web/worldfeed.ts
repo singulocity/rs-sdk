@@ -1,9 +1,11 @@
 import type { ServerWebSocket } from 'bun';
 
 import Npc from '#/engine/entity/Npc.js';
-import Player from '#/engine/entity/Player.js';
+import Player, { getExpByLevel } from '#/engine/entity/Player.js';
+import InvType from '#/cache/config/InvType.js';
+import ObjType from '#/cache/config/ObjType.js';
 import { NpcStat } from '#/engine/entity/NpcStat.js';
-import { PlayerStat } from '#/engine/entity/PlayerStat.js';
+import { PlayerStat, PlayerStatEnabled, PlayerStatNameMap } from '#/engine/entity/PlayerStat.js';
 import World from '#/engine/World.js';
 import Packet from '#/io/Packet.js';
 import { NpcInfoProt, PlayerInfoProt } from '#/network/rsbuf/prot.js';
@@ -27,6 +29,7 @@ import type { WebSocketData } from './websocket.js';
 //
 // Protocol (JSON text frames, see WORLD_FEED_VERSION):
 //   client -> {t:'sub', x, z, w, h}     subscribe to tiles [x, x+w) x [z, z+h), all levels
+//             {t:'inspect', name}      watch one player's inventory/skills; null stops
 //             {t:'roster', on}          toggle the all-player roster
 //   server -> {t:'hello', v, rev, tick, tickMs, players}
 //             {t:'tick', k, ms, p?, n?, rp?, rn?, reset?}  once per tick while subscribed
@@ -47,6 +50,7 @@ import type { WebSocketData } from './websocket.js';
 //   em    exact move [startX, startZ, endX, endZ, startCycle, endCycle, facing]
 
 const WORLD_FEED_VERSION = 1;
+const INSPECT_INTERVAL_MS = 1000;
 const MAX_RECT_SIZE = 384;
 const MAX_BUFFERED_BYTES = 1 << 20;
 const ROSTER_INTERVAL_TICKS = 10;
@@ -78,6 +82,8 @@ type Subscriber = {
     z1: number;
     subscribed: boolean;
     roster: boolean;
+    inspectName: string | null;
+    inspectedAt: number;
     resync: boolean;
     players: Map<number, KnownEntity>;
     npcs: Map<number, KnownEntity>;
@@ -126,6 +132,8 @@ export function onWorldFeedOpen(ws: ServerWebSocket<WebSocketData>): void {
         z1: 0,
         subscribed: false,
         roster: false,
+        inspectName: null,
+        inspectedAt: -Infinity,
         resync: false,
         players: new Map(),
         npcs: new Map()
@@ -134,6 +142,7 @@ export function onWorldFeedOpen(ws: ServerWebSocket<WebSocketData>): void {
     send(ws, {
         t: 'hello',
         v: WORLD_FEED_VERSION,
+        inspect: true,
         rev: Environment.engine.revision,
         tick: World.currentTick,
         tickMs: World.tickRate,
@@ -147,7 +156,7 @@ export function onWorldFeedMessage(ws: ServerWebSocket<WebSocketData>, message: 
         return;
     }
 
-    let msg: { t?: unknown; x?: unknown; z?: unknown; w?: unknown; h?: unknown; on?: unknown };
+    let msg: { t?: unknown; x?: unknown; z?: unknown; w?: unknown; h?: unknown; on?: unknown; name?: unknown };
     try {
         msg = JSON.parse(message.toString());
     } catch {
@@ -166,6 +175,13 @@ export function onWorldFeedMessage(ws: ServerWebSocket<WebSocketData>, message: 
         sub.subscribed = w > 0 && h > 0;
     } else if (msg.t === 'roster') {
         sub.roster = msg.on === true;
+    } else if (msg.t === 'inspect') {
+        if (msg.name !== null && (typeof msg.name !== 'string' || !/^[a-z0-9 _]{1,12}$/i.test(msg.name))) return;
+        const name = typeof msg.name === 'string' ? msg.name.trim().replace(/_/g, ' ').toLowerCase() : null;
+        if (name !== sub.inspectName) {
+            sub.inspectName = name || null;
+            sub.inspectedAt = -Infinity;
+        }
     }
 }
 
@@ -191,11 +207,16 @@ export function cycleWorldFeed(): void {
             break;
         }
     }
-    if (!busy) {
-        return;
-    }
-
     try {
+        // Inspection is independent of the camera's subscribed area.
+        for (const sub of subscribers.values()) {
+            if (sub.inspectName && start - sub.inspectedAt >= INSPECT_INTERVAL_MS && sub.ws.getBufferedAmount() <= MAX_BUFFERED_BYTES) {
+                sub.inspectedAt = start;
+                send(sub.ws, { t: 'inspect', k: tick, name: sub.inspectName, player: inspectPlayer(sub.inspectName) });
+            }
+        }
+
+        if (!busy) return;
         buildBuckets();
         recordJson.clear();
 
@@ -523,6 +544,37 @@ function hitmarks(primary: number, secondary: number, damage: number, type: numb
         marks.push([damage2, type2]);
     }
     return marks;
+}
+
+function inspectPlayer(name: string): FeedRecord | null {
+    const player = [...World.playerLoop.all()].find(p => p.isActive && p.visibility === Visibility.DEFAULT && p.displayName.toLowerCase() === name);
+    if (!player) return null;
+
+    // Read the container directly: getInventory() would create one as a side effect.
+    const items = player.invs.get(InvType.INV)?.items;
+    const inventory = Array.from({ length: 28 }, (_, slot) => {
+        const item = items?.[slot];
+        return item ? { id: item.id, count: item.count, name: ObjType.get(item.id).name } : null;
+    });
+    const skills = [...PlayerStatNameMap].filter(([id]) => PlayerStatEnabled[id]).map(([id, key]) => {
+        const baseLevel = player.baseLevels[id];
+        return {
+            id,
+            name: key[0] + key.slice(1).toLowerCase(),
+            level: player.levels[id],
+            baseLevel,
+            xp: Math.floor(player.stats[id] / 10),
+            levelXp: baseLevel > 1 ? getExpByLevel(baseLevel) / 10 : 0,
+            nextLevelXp: baseLevel < 99 ? getExpByLevel(baseLevel + 1) / 10 : null
+        };
+    });
+    return {
+        name: player.displayName,
+        combatLevel: player.combatLevel,
+        hp: [player.levels[PlayerStat.HITPOINTS], player.baseLevels[PlayerStat.HITPOINTS]],
+        inventory,
+        skills
+    };
 }
 
 function buildRoster(tick: number): FeedRecord {
