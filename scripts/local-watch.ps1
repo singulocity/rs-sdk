@@ -149,10 +149,20 @@ function Stop-Stack {
             $logout = Join-Path $repoRoot 'scripts/local-logout.ts'
             $arguments = @($logout, $BotName) | ForEach-Object { '"' + $_ + '"' }
             $job = Start-Process -FilePath (Get-BunPath) -ArgumentList $arguments -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir 'logout.out.log') -RedirectStandardError (Join-Path $logDir 'logout.err.log')
-            if (!$job.WaitForExit(25000)) {
+            $logoutDeadline = [datetime]::UtcNow.AddSeconds(120)
+            $elapsedSeconds = 0
+            while (!$job.WaitForExit(1000) -and [datetime]::UtcNow -lt $logoutDeadline) {
+                $elapsedSeconds++
+                if ($elapsedSeconds % 5 -eq 0) {
+                    Write-Host "Still waiting for confirmed logout ($elapsedSeconds seconds). Combat can delay logout."
+                }
+            }
+            if (!$job.HasExited) {
                 $job.Kill()
                 throw 'Logout timed out. Server was left running. Check local.cmd logs -Service logout'
             }
+            # Confirm completed logout from the server below, not the helper's exit status.
+            Get-Content -LiteralPath (Join-Path $logDir 'logout.out.log') -Tail 1 | Out-Host
         }
         $deadline = [datetime]::UtcNow.AddSeconds(25)
         $empty = $false

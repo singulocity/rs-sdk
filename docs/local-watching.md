@@ -15,7 +15,10 @@ PowerShell or Windows Terminal:
 Open http://localhost:3000 to watch. Start launches the engine, gateway, viewer,
 bot client, and bot routine; it reuses processes already tracked by the launcher.
 Stop ends the routine, requests a normal bot logout, waits for zero online players,
-then closes the managed services and the viewer's child processes. If logout
+then closes the managed services and the viewer's child processes. Combat blocks
+logout until 10 seconds after it ends; the launcher retries for up to 90 seconds
+and prints waiting messages. It requires an observed client disconnect, rather
+than treating a successful button dispatch as a completed logout. If logout
 cannot finish, it leaves the server running and reports the problem.
 
 Closing the browser or terminal does **not** stop background services. Use
