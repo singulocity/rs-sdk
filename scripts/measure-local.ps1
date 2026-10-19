@@ -31,7 +31,7 @@ if ($viewer) {
 }
 function Get-Skills {
     $controlFile = Join-Path $stateDir 'control-config.json'
-    $names = if (Test-Path -LiteralPath $controlFile) { @((Get-Content -LiteralPath $controlFile -Raw | ConvertFrom-Json).botName) } else { @() }
+    $names = @(if (Test-Path -LiteralPath $controlFile) { (Get-Content -LiteralPath $controlFile -Raw | ConvertFrom-Json).botName })
     $manifest = Join-Path $stateDir 'fleet.json'
     if (Test-Path -LiteralPath $manifest) { $names += @((Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).name) }
     foreach ($name in $names) {

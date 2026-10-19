@@ -17,7 +17,7 @@ $tracked = @{}
 foreach ($file in Get-ChildItem -LiteralPath $StateDirectory -Filter '*-process.json') {
     try {
         $record = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-        if ($record.name -notmatch '^(engine|gateway|viewer|bot|routine)(-[a-zA-Z0-9]{1,12})?$' -or
+        if ($record.name -notmatch '^(engine|gateway|viewer|bot|routine|controller)(-[a-zA-Z0-9]{1,12})?$' -or
             $file.BaseName -ne ($record.name + '-process')) { continue }
         $entry = $byId[[int]$record.processId]
         if (!$entry -or !$record.startedAt -or

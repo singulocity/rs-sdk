@@ -14,8 +14,8 @@ PowerShell or Windows Terminal:
 ```
 
 Open http://localhost:3000 to watch. Start launches the engine, gateway, viewer,
-bot client, and bot routine; it reuses processes already tracked by the launcher.
-Stop ends the routine, requests a normal bot logout, waits for zero online players,
+bot clients, and one shared controller; it reuses tracked processes.
+Stop cancels all controller routines, requests a normal bot logout, waits for zero online players,
 then closes the managed services and the viewer's child processes. Combat blocks
 logout until 10 seconds after it ends; the launcher retries for up to 90 seconds
 and prints waiting messages. It requires an observed client disconnect, rather
@@ -33,7 +33,8 @@ projects may use them.
 | gateway | Routes bot state and script commands | 7780 |
 | viewer | rs-world website | 3000 |
 | bot | Logged-in headless game client | — |
-| routine | Runs the bot's watch.ts (or script.ts) | — |
+| controller | Runs all configured training routines with one shared pathfinder | — |
+| routine | Per-bot watch.ts entry point in optional separate mode | — |
 
 The first start finds the bot automatically when only one bot folder exists.
 To choose explicitly:
@@ -45,7 +46,9 @@ To choose explicitly:
 The launcher remembers the choice in `bots/local-watch/control-config.json`.
 Logs and process records are in `bots/local-watch/`; these are ignored by Git.
 Logs prints the last 25 lines of both output and error logs; choose
-`-Service engine|gateway|viewer|bot|routine|logout`.
+`-Service engine|gateway|viewer|bot|routine|controller|logout`.
+Without `-LogBot`, routine logs show the shared controller; `-LogBot` selects the
+individual bot's log. Status includes each supervised bot's role and training state.
 
 Your character's inventory, skills and position persist in the engine's local
 save data under `server/engine/data/players/`. Stop and restart preserve that data;
@@ -53,8 +56,10 @@ they do not reset the character. Temporary world activity (such as ground drops)
 can reset when the engine restarts. No save/database deletion is part of these
 commands.
 
-Edit `bots/<name>/watch.ts` to change the bot's behavior, then use `restart` to run
-the updated routine. This launcher does not freeze the simulation or edit XP,
+Shared mode runs the reusable roles in `scripts/training.ts`,
+`scripts/training-more.ts` and `scripts/training-woodcutting.ts`. Edit these and
+restart to change training behavior. Individual `bots/<name>/watch.ts` files
+remain available in separate mode. This launcher does not freeze the simulation or edit XP,
 inventories or world state; those are separate server/game operations.
 
 ## Ten-bot training fleet
@@ -74,8 +79,9 @@ Run the original bot plus nine training bots:
 | SneakSage | Pickpocketing men | Lumbridge |
 | BoneBasil | Burying bones | Lumbridge chicken farm |
 
-The shared routine code is in `scripts/training.ts` and `scripts/training-more.ts`. Each bot has its own
-`bots/<name>/watch.ts` entry point and separate client/controller processes.
+The training functions run concurrently in `scripts/fleet-controller.ts`. Each bot
+has its own SDK connection, state, cancellation scope and retry loop. One process
+owns the shared collision map/pathfinder. Game clients remain separate processes.
 They keep their own skills, inventory and position. Low-HP bots eat available
 food; combat pauses at low HP when food runs out. Safe gathering can continue
 during natural healing. Fishing/mining bots drop their catches/ore when nearly full.
@@ -114,10 +120,10 @@ See [Skill coverage](training-skills.md) for the 19 enabled skills and remaining
 Click **Processes** in the viewer's bottom-right corner to see all managed
 services, bot clients/controllers and their child processes. It replaces Info.
 The table includes PIDs, working sets and private committed bytes, with totals
-and the machine's RAM usage. Each bot starts collapsed, with a total for its
-client, controller and child processes. Expand the bot's row for individual PIDs
-and memory figures; the original bot uses its configured name. Shared services
-remain separate. Click column headings to sort by the combined totals.
+and the machine's RAM usage. Expand **All bots** for per-bot client totals and
+the **Shared controller**, then expand a bot for its processes and PIDs. The
+shared controller is counted once in All bots; it is not charged to every bot.
+Engine, gateway and viewer remain outside that total. Click column headings to sort.
 
 The Windows gateway samples on demand and shares a cached reading for five seconds.
 Closing the panel stops polling. Browser/GPU memory is excluded; working-set
@@ -131,3 +137,36 @@ their creation time to exclude stale/reused PIDs; it does not expose command lin
 
 Drag the character inspector by its title to reposition it. The title also accepts
 arrow keys when focused. It stays within the window when dragged or resized.
+
+## Shared controller
+
+Shared mode is the default. `start -ControllerMode shared` validates the fleet,
+stops any old standalone routines, and attaches the shared controller to the
+existing game clients. Character state and live client sessions are preserved
+during this migration. Shutdown cancels controller work before requesting saved
+game logouts. The shared controller supports the ten roles listed in
+`scripts/fleet-config.ts`; credentials stay in each bot's local env file.
+
+The primary role defaults to woodcutting; `primaryRole` in
+`bots/local-watch/control-config.json` can select another supported role. Other
+roles come from `bots/local-watch/fleet.json`. Restart after changing membership
+or roles so the controller reloads them. Startup rejects duplicate names,
+unsupported roles and mismatched credentials before stopping existing routines.
+
+Use `local.cmd logs -Service controller` for combined logs, or
+`local.cmd logs -Service routine -LogBot ChefCora` for one bot.
+`controller-status.json` reports each bot's state and is ignored by Git.
+
+To use personal standalone watch scripts or roll back to individual controllers:
+
+```powershell
+.\local.cmd start -ControllerMode separate
+.\local.cmd start -ControllerMode shared
+```
+
+The selected mode is remembered. A failed bot session is cancelled and retried
+without restarting healthy sessions. A process-level crash still affects the
+whole controller, and synchronous pathfinding shares its CPU thread. This is a
+first memory optimization; it is not a validated 1,000-bot capacity claim.
+
+See [Shared-controller measurements](shared-controller.md) for the initial comparison.

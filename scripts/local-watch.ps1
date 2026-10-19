@@ -5,7 +5,9 @@ param(
     [string]$BotName,
     [string]$ViewerPath,
     [string]$LogBot,
-    [ValidateSet('engine', 'gateway', 'viewer', 'bot', 'routine', 'logout')]
+    [ValidateSet('shared', 'separate')]
+    [string]$ControllerMode,
+    [ValidateSet('engine', 'gateway', 'viewer', 'bot', 'routine', 'controller', 'logout')]
     [string]$Service = 'routine'
 )
 
@@ -16,15 +18,16 @@ Usage: .\local.cmd <command> [options]
 Commands:
   help      Show this reference.
   status    Show services, process IDs, and ports.
-  start     Start the server, gateway, viewer, bot, and routine.
+  start     Start the server, gateway, viewer, bot clients, and controller.
   stop      Log out and save the bot, then stop the local setup.
   restart   Stop the local setup, then start it again.
   logs      Show the last 25 lines of output and errors (default: routine).
 
 Options:
   -LogBot      Select a fleet bot for bot/routine/logout logs.
-  -Service     engine | gateway | viewer | bot | routine | logout
+  -Service     engine | gateway | viewer | bot | routine | controller | logout
                Select which logs to display.
+  -ControllerMode shared (default) | separate; the choice is remembered.
   -BotName     Choose the bot when starting; the choice is remembered.
   -ViewerPath  Path to your rs-world checkout; the choice is remembered.
 
@@ -50,6 +53,7 @@ $stateDir = Join-Path $repoRoot 'bots/local-watch'
 $logDir = Join-Path $stateDir 'logs'
 $configFile = Join-Path $stateDir 'control-config.json'
 $config = if (Test-Path -LiteralPath $configFile) { Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json } else { $null }
+if (!$ControllerMode) { $ControllerMode = if ($config -and $config.controllerMode) { $config.controllerMode } else { 'shared' } }
 if (!$BotName) {
     if ($config) { $BotName = $config.botName }
     else {
@@ -73,9 +77,11 @@ $specs = @{
     gateway = @{ cwd = Join-Path $repoRoot 'server/gateway'; entry = 'gateway.ts'; pattern = 'gateway\.ts'; port = 7780 }
     viewer = @{ cwd = $ViewerPath; entry = 'node_modules/@craco/craco/dist/bin/craco.js'; pattern = '[\\/]craco[\\/].*\bstart\b'; port = 3000 }
     bot = @{ cwd = Join-Path $repoRoot 'server/webclient'; entry = 'src/lite/runner.ts'; pattern = 'src[\\/]lite[\\/]runner\.ts'; port = 0 }
+    controller = @{ cwd = $repoRoot; entry = 'scripts/fleet-controller.ts'; pattern = 'scripts[\\/]fleet-controller\.ts'; port = 0 }
     routine = @{ cwd = $repoRoot; entry = $routineFile; pattern = [regex]::Escape([IO.Path]::GetFileName($routineFile)); port = 0 }
 }
-$serviceNames = @('engine', 'gateway', 'viewer', 'bot', 'routine')
+$serviceNames = @('engine', 'gateway', 'viewer', 'bot')
+$serviceNames += $(if ($ControllerMode -eq 'shared') { 'controller' } else { 'routine' })
 $specs.bot.botName = $BotName
 $specs.routine.botName = $BotName
 $botGroups = @(@{name=$BotName;client='bot';routine='routine';logout='logout'})
@@ -93,7 +99,8 @@ if (Test-Path -LiteralPath $fleetFile) {
         $specs[$clientKey] = @{cwd=Join-Path $repoRoot 'server/webclient';entry='src/lite/runner.ts';pattern='src[\\/]lite[\\/]runner\.ts';port=0;botName=$name}
         $specs[$routineKey] = @{cwd=$repoRoot;entry=$entry;pattern=[regex]::Escape($entry);port=0;botName=$name}
         $botGroups += @{name=$name;client=$clientKey;routine=$routineKey;logout='logout-'+$name}
-        $serviceNames += $clientKey, $routineKey
+        $serviceNames += $clientKey
+        if ($ControllerMode -eq 'separate') { $serviceNames += $routineKey }
     }
 }
 
@@ -186,6 +193,38 @@ function Stop-LocalService([string]$Name) {
     Write-Host "Stopped $Name."
 }
 
+function Stop-Controller {
+    $process = Get-ManagedProcess 'controller'
+    if (!$process) { return }
+    $startedAt = $null
+    try {
+        $status = Get-Content -LiteralPath (Join-Path $stateDir 'controller-status.json') -Raw | ConvertFrom-Json
+        if ($status.processId -eq $process.ProcessId) { $startedAt = $status.startedAt }
+    } catch {}
+    @{processId=$process.ProcessId;startedAt=$startedAt} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stateDir 'controller-stop.json')
+    $deadline = [datetime]::UtcNow.AddSeconds(15)
+    while ((Get-ManagedProcess 'controller') -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
+    if (Get-ManagedProcess 'controller') { Write-Warning 'Controller shutdown timed out; stopping its managed process tree.' }
+    Stop-LocalService 'controller'
+}
+
+function Wait-Controller {
+    $deadline = [datetime]::UtcNow.AddSeconds(60)
+    do {
+        $process = Get-ManagedProcess 'controller'
+        if (!$process) { throw 'Shared controller exited. See local.cmd logs -Service controller.' }
+        try {
+            $status = Get-Content -LiteralPath (Join-Path $stateDir 'controller-status.json') -Raw | ConvertFrom-Json
+            $ready = $status.processId -eq $process.ProcessId -and
+                ([datetime]$status.updatedAt).ToUniversalTime() -ge $process.CreationDate.ToUniversalTime()
+            foreach ($group in $botGroups) { if ($status.bots.($group.name).state -ne 'running') { $ready = $false } }
+            if ($ready) { return }
+        } catch {}
+        Start-Sleep -Milliseconds 500
+    } while ([datetime]::UtcNow -lt $deadline)
+    throw 'Some shared-controller bots are not ready. The controller keeps retrying; see local.cmd logs -Service controller.'
+}
+
 function Show-Status {
     $rows = foreach ($name in $serviceNames) {
         $process = Get-ManagedProcess $name
@@ -193,6 +232,14 @@ function Show-Status {
             PID = $(if ($process) { $process.ProcessId } else { '-' }); Port = $(if ($specs[$name].port) { $specs[$name].port } else { '-' }) }
     }
     $rows | Format-Table -AutoSize | Out-Host
+    if ($ControllerMode -eq 'shared' -and (Get-ManagedProcess 'controller')) {
+        try {
+            $status = Get-Content -LiteralPath (Join-Path $stateDir 'controller-status.json') -Raw | ConvertFrom-Json
+            $status.bots.PSObject.Properties | ForEach-Object {
+                [pscustomobject]@{Bot=$_.Name;Role=$_.Value.role;Training=$_.Value.state}
+            } | Format-Table -AutoSize | Out-Host
+        } catch {}
+    }
     Write-Host ("Bots: " + (($botGroups | ForEach-Object { $_.name }) -join ", "))
     Write-Host 'Viewer: http://localhost:3000'
     Write-Host "Logs: $logDir"
@@ -211,10 +258,11 @@ function Start-BotGroup($Group) {
         Start-Sleep -Milliseconds 500
     } while ([datetime]::UtcNow -lt $deadline)
     if (!$ready) { throw ("Bot did not connect: " + $Group.name) }
-    Start-LocalService $Group.routine
+    if ($ControllerMode -eq 'separate') { Start-LocalService $Group.routine }
 }
 
 function Stop-Stack {
+    Stop-Controller
     foreach ($group in $botGroups) { Stop-LocalService $group.routine }
     if (Get-ManagedProcess 'engine') {
         foreach ($group in $botGroups) {
@@ -254,7 +302,7 @@ function Stop-Stack {
 try {
     if ($Action -eq 'status') { Show-Status; exit 0 }
     if ($Action -eq 'logs') {
-        $logKey = $Service
+        $logKey = if ($Service -eq 'routine' -and !$LogBot -and $ControllerMode -eq 'shared') { 'controller' } else { $Service }
         if ($LogBot) {
             $group = $botGroups | Where-Object { $_.name -eq $LogBot } | Select-Object -First 1
             if (!$group -or $Service -notin @('bot','routine','logout')) { throw 'Choose a configured -LogBot with -Service bot, routine, or logout.' }
@@ -270,13 +318,19 @@ try {
     if ($Action -eq 'stop' -or $Action -eq 'restart') { Stop-Stack }
     if ($Action -eq 'start' -or $Action -eq 'restart') {
         if (!(Test-Path -LiteralPath (Join-Path $botDir 'bot.env'))) { throw "Missing bot credentials in $botDir" }
-        if (!(Test-Path -LiteralPath $routineFile)) { throw 'Create watch.ts or script.ts in the bot folder first.' }
+        if ($ControllerMode -eq 'separate' -and !(Test-Path -LiteralPath $routineFile)) { throw 'Create watch.ts or script.ts in the bot folder first.' }
         foreach ($group in $botGroups) {
             $envPath = Join-Path $repoRoot ("bots/" + $group.name + "/bot.env")
-            if (!(Test-Path -LiteralPath $envPath) -or !(Test-Path -LiteralPath $specs[$group.routine].entry)) { throw ("Missing credentials or routine for " + $group.name) }
+            if (!(Test-Path -LiteralPath $envPath) -or ($ControllerMode -eq 'separate' -and !(Test-Path -LiteralPath $specs[$group.routine].entry))) { throw ("Missing credentials or routine for " + $group.name) }
         }
         $null = New-Item -ItemType Directory -Path $logDir -Force
-        @{ botName = $BotName; viewerPath = $ViewerPath } | ConvertTo-Json | Set-Content -LiteralPath $configFile
+        $primaryRole = if ($config -and $config.primaryRole) { $config.primaryRole } else { 'woodcutting' }
+        @{ botName = $BotName; viewerPath = $ViewerPath; controllerMode=$ControllerMode; primaryRole=$primaryRole } | ConvertTo-Json | Set-Content -LiteralPath $configFile
+        if ($ControllerMode -eq 'shared') {
+            & (Get-BunPath) (Join-Path $repoRoot 'scripts/fleet-controller.ts') --check
+            if ($LASTEXITCODE -ne 0) { throw 'Shared-controller preflight failed; existing routines were left running.' }
+            foreach ($group in $botGroups) { Stop-LocalService $group.routine }
+        } else { Stop-Controller }
         $env:WORLD_FEED = 'true'
         $env:EASY_STARTUP = 'true'
         $env:BUILD_VERIFY = 'false'
@@ -292,6 +346,7 @@ try {
         Start-LocalService 'viewer'
         Wait-Http 'viewer' 'http://127.0.0.1:3000'
         foreach ($group in $botGroups) { Start-BotGroup $group }
+        if ($ControllerMode -eq 'shared') { Start-LocalService 'controller'; Wait-Controller }
         Show-Status
     }
 } catch {
