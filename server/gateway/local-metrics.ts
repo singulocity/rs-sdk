@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 
 export interface MemorySnapshot {
     sampledAt: string;
-    processes: { service: string; pid: number; workingSetBytes: number; privateBytes: number }[];
+    processes: { service: string; botName?: string | null; pid: number; workingSetBytes: number; privateBytes: number }[];
     totals: { processCount: number; workingSetBytes: number; privateBytes: number };
     host: { totalBytes: number; availableBytes: number };
 }

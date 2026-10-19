@@ -2,6 +2,14 @@
 param([string]$StateDirectory)
 $ErrorActionPreference = 'Stop'
 if (!$StateDirectory) { $StateDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'bots/local-watch' }
+$primaryBot = 'Original bot'
+$configFile = Join-Path $StateDirectory 'control-config.json'
+if (Test-Path -LiteralPath $configFile) {
+    try {
+        $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
+        if ($config.botName -match '^[a-zA-Z0-9]{1,12}$') { $primaryBot = [string]$config.botName }
+    } catch {} # A partial config should not prevent memory sampling.
+}
 $snapshot = @(Get-CimInstance Win32_Process)
 $byId = @{}
 foreach ($entry in $snapshot) { $byId[[int]$entry.ProcessId] = $entry }
@@ -35,6 +43,9 @@ while ($queue.Count -gt 0) {
 $rows = @($tracked.Values | ForEach-Object {
     [pscustomobject]@{
         service=$_.service; pid=[int]$_.entry.ProcessId
+        botName=$(if ($_.service -match '^(?:bot|routine)(?:-([a-zA-Z0-9]{1,12}))?(?: / child)?$') {
+            if ($Matches[1]) { $Matches[1] } else { $primaryBot }
+        } else { $null })
         workingSetBytes=[long]$_.entry.WorkingSetSize
         privateBytes=[long]$_.entry.PrivatePageCount
     }

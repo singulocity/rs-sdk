@@ -114,7 +114,10 @@ See [Skill coverage](training-skills.md) for the 19 enabled skills and remaining
 Click **Processes** in the viewer's bottom-right corner to see all managed
 services, bot clients/controllers and their child processes. It replaces Info.
 The table includes PIDs, working sets and private committed bytes, with totals
-and the machine's RAM usage. Click column headings to sort.
+and the machine's RAM usage. Each bot starts collapsed, with a total for its
+client, controller and child processes. Expand the bot's row for individual PIDs
+and memory figures; the original bot uses its configured name. Shared services
+remain separate. Click column headings to sort by the combined totals.
 
 The Windows gateway samples on demand and shares a cached reading for five seconds.
 Closing the panel stops polling. Browser/GPU memory is excluded; working-set
