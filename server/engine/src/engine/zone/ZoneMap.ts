@@ -22,6 +22,10 @@ export default class ZoneMap {
         this.grids = new Map();
     }
 
+    findZone(x: number, z: number, level: number): Zone | undefined {
+        return this.zones.get(ZoneMap.zoneIndex(x, z, level));
+    }
+
     zone(x: number, z: number, level: number): Zone {
         const zoneIndex: number = ZoneMap.zoneIndex(x, z, level);
         let zone: Zone | undefined = this.zones.get(zoneIndex);

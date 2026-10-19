@@ -103,6 +103,10 @@ survival) is described in the project memory; this file is the human-readable ch
       branches in `websocket.ts` upgrade/open/message/close, and `cycleWorldFeed()` in
       `World.cycle()` between `processClientsOut()` and `processCleanup()` — it reads the per-tick
       info masks, `walkDir`/`runDir`/`tele`/`jump` and `lastTickX/Z`, so it must stay before cleanup.
+      Includes opt-in-per-socket `inspect` subscriptions: one player by name, inventory and enabled
+      skills once per second, independent of camera area. XP uses engine fine units divided by 10
+      and the engine's own level thresholds. Reads `invs` without creating containers. Shares the
+      existing feed token/access policy; never expose bot passwords or bank contents.
       Verify: `grep -n "cycleWorldFeed()" src/engine/World.ts` and `bun test test/worldfeed.test.ts`.
 - [ ] **`view/bot.ejs`** — the entire bot UI page (rs-sdk-only): reads `?bot=`/`?password=`
       (auto-login), **writes both back to the URL on login/field-change**, cache-busted
@@ -385,6 +389,16 @@ Upgrade hazards:
       and survive rebases, but re-run a smoke test if smithing/magic behaves oddly.
 
 ---
+
+## Live ground items
+
+- [ ] **`engine/src/web/worldfeed.ts`** — optional `{t:"items",on:true}` subscription;
+      tick `o` records are `{i,t,c,x,z,l}`, `ro` removes stable object IDs. Includes
+      private drops for spectators and active static spawns; follows stack changes,
+      pickups, respawns, camera subscriptions and slow-client resets.
+- [ ] **`GameMap.findZone` / `ZoneMap.findZone`** — read-only zone lookup for spectator
+      item scans; viewing empty areas must never allocate game zones.
+      Verify with `bun test test/worldfeed.test.ts` from `server/engine`.
 
 ## Cross-boundary invariants (how things actually break)
 

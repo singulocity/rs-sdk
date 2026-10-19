@@ -194,9 +194,10 @@ export async function handleSpriteRequest(url: URL): Promise<Response | null> {
     if (!png) {
         return new Response(null, { status: 404, headers: { 'Cache-Control': 'public, max-age=300' } });
     }
-    return new Response(png, {
+    return new Response(new Uint8Array(png).buffer, {
         headers: {
             'Content-Type': 'image/png',
+            'Cross-Origin-Resource-Policy': 'cross-origin',
             'Content-Length': String(png.length),
             'Cache-Control': 'public, max-age=86400'
         }

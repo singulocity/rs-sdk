@@ -16,6 +16,9 @@ import { chunkMessage } from '../../sdk/chunking';
 import { repeatsLastFanout } from './state-fanout';
 import { StateFieldSampler, TrafficMeter, formatFieldReport, formatTrafficReport, type ConnectionLabel } from './traffic';
 import { isIP } from 'node:net';
+import { createMemorySampler, localMetricsResponse } from './local-metrics';
+
+const sampleLocalMemory = createMemorySampler();
 
 const GATEWAY_PORT = parseInt(process.env.AGENT_PORT || '7780');
 // Bind address. Fleet hosts running a private gateway set 127.0.0.1 so only
@@ -874,6 +877,13 @@ console.log(`[Gateway] Starting Gateway Service on port ${GATEWAY_PORT}...`);
 const gatewayHandlers = {
     async fetch(req: Request, server: any) {
         const url = new URL(req.url);
+
+        // Only the opted-in local listener exposes machine/process statistics.
+        if (url.pathname === '/local/metrics') {
+            const enabled = process.env.LOCAL_PROCESS_METRICS === 'true' &&
+                !(GATEWAY_PUBLIC_PORT > 0 && server.port === GATEWAY_PUBLIC_PORT);
+            return localMetricsResponse(req, server.requestIP(req)?.address ?? '', enabled, sampleLocalMemory);
+        }
 
         // WebSocket upgrade
         if (req.headers.get('upgrade') === 'websocket') {

@@ -186,3 +186,151 @@ test('loaded unchanged zones skip writes, new zones and private events retain de
     player.buildArea.activeZones.clear(); player.updateZones();
     expect(player.buildArea.loadedZones.size).toBe(0);
 });
+
+const originalNow = Date.now;
+
+test('inspection is opt-in, independent of area, throttled, and does not create inventories', () => {
+    const now = mock(Date.now);
+    Date.now = now;
+    now.mockReturnValue(10000);
+    try {
+        const player = addPlayer(30, 3210, 3210);
+        player.levels[8] = 7;
+        player.baseLevels[8] = 6;
+        player.stats[8] = 15000;
+        const v = viewer();
+        const other = viewer();
+        expect(JSON.parse(v.sent[0]).inspect).toBe(true);
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: 'FEED30' }));
+        cycleWorldFeed();
+        expect(v.last()).toMatchObject({ t: 'inspect', name: 'feed30', player: { name: 'Feed30', inventory: Array(28).fill(null) } });
+        expect(v.last().player.skills.find((s: any) => s.id === 8)).toMatchObject({ level: 7, baseLevel: 6, xp: 1500 });
+        expect(v.last().player.skills).toHaveLength(19);
+        expect(player.invs.size).toBe(0);
+        expect(other.sent).toHaveLength(1);
+        const sent = v.sent.length;
+        cycleWorldFeed();
+        expect(v.sent).toHaveLength(sent);
+        now.mockReturnValue(11000);
+        player.visibility = Visibility.HARD;
+        cycleWorldFeed();
+        expect(v.last().player).toBeNull();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: null }));
+        now.mockReturnValue(12000);
+        cycleWorldFeed();
+        expect(v.sent).toHaveLength(sent + 1);
+    } finally {
+        Date.now = originalNow;
+    }
+});
+
+test('inspection preserves slots and counts, uses real XP units, and tracks names across slot reuse', async () => {
+    const { spyOn } = await import('bun:test');
+    const { Inventory } = await import('../../src/engine/Inventory.js');
+    const { default: InvType } = await import('../../src/cache/config/InvType.js');
+    const { default: ObjType } = await import('../../src/cache/config/ObjType.js');
+    const { getExpByLevel } = await import('../../src/engine/entity/Player.js');
+    const getItem = spyOn(ObjType, 'get').mockReturnValue({ name: 'Logs' } as any);
+    const now = mock(() => 20000);
+    Date.now = now;
+    try {
+        const player = addPlayer(40, 3210, 3210);
+        const inv = new Inventory(InvType.INV, 28);
+        inv.items[3] = { id: 1511, count: 25 };
+        player.invs.set(InvType.INV, inv);
+        player.baseLevels[8] = 6;
+        player.levels[8] = 7;
+        player.stats[8] = 15000;
+        const v = viewer();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: 'Feed40' }));
+        cycleWorldFeed();
+        expect(v.last().player.inventory[0]).toBeNull();
+        expect(v.last().player.inventory[3]).toEqual({ id: 1511, count: 25, name: 'Logs' });
+        expect(v.last().player.skills.find((s: any) => s.id === 8)).toEqual({
+            id: 8, name: 'Woodcutting', level: 7, baseLevel: 6, xp: 1500,
+            levelXp: getExpByLevel(6) / 10, nextLevelXp: getExpByLevel(7) / 10
+        });
+        expect(inv.update).toBe(false);
+        expect(inv.dirtySlots.size).toBe(0);
+        player.unlink();
+        const replacement = addPlayer(41, 3210, 3210);
+        replacement.slot = 40;
+        now.mockReturnValue(21000);
+        cycleWorldFeed();
+        expect(v.last().player).toBeNull();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: 'Feed41' }));
+        cycleWorldFeed();
+        expect(v.last().player.name).toBe('Feed41');
+        const count = v.sent.length;
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'inspect', name: { bad: true } }));
+        cycleWorldFeed();
+        expect(v.sent).toHaveLength(count);
+    } finally {
+        Date.now = originalNow;
+        getItem.mockRestore();
+    }
+});
+
+test('ground items opt in, track stacks, pickups, respawns and camera changes without mutating zones', async () => {
+    const { default: Obj } = await import('../../src/engine/entity/Obj.js');
+    const { EntityLifeCycle } = await import('../../src/engine/entity/EntityLifeCycle.js');
+    World.currentTick = 100;
+    const v = viewer(AREA);
+    const legacy = viewer(AREA);
+    const obj = new Obj(2, 3210, 3210, EntityLifeCycle.RESPAWN, 995, 25);
+    const zone = World.gameMap.getZone(obj.x, obj.z, obj.level);
+    zone.addStaticObj(obj);
+    obj.receiver64 = 123n;
+    obj.reveal = 100;
+    try {
+        cycleWorldFeed();
+        expect(v.last().o).toBeUndefined();
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'items', on: true }));
+        const zonesBefore = World.gameMap.getTotalZones();
+        cycleWorldFeed();
+        const item = v.last().o[0];
+        expect(item).toEqual({ i: expect.any(Number), t: 995, c: 25, x: 3210, z: 3210, l: 2 });
+        expect(legacy.last().o).toBeUndefined();
+        expect(World.gameMap.getTotalZones()).toBe(zonesBefore);
+        expect(obj.reveal).toBe(100);
+        expect(obj.receiver64).toBe(123n);
+        endTick();
+        cycleWorldFeed();
+        expect(v.last().o).toBeUndefined();
+        endTick();
+        obj.count = 100;
+        cycleWorldFeed();
+        expect(v.last().o).toEqual([{ ...item, c: 100 }]);
+        endTick();
+        obj.isActive = false; // pickup/despawn
+        cycleWorldFeed();
+        expect(v.last().ro).toEqual([item.i]);
+        endTick();
+        obj.isActive = true; // static spawn returns
+        cycleWorldFeed();
+        expect(v.last().o).toEqual([{ ...item, c: 100 }]);
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'sub', x: 1000, z: 1000, w: 64, h: 64 }));
+        cycleWorldFeed();
+        expect(v.last().ro).toEqual([item.i]);
+        expect(World.gameMap.getTotalZones()).toBe(zonesBefore);
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'sub', ...AREA }));
+        cycleWorldFeed();
+        expect(v.last().o[0].i).toBe(item.i);
+        endTick();
+        v.ws.getBufferedAmount = () => 2 << 20;
+        cycleWorldFeed();
+        endTick();
+        v.ws.getBufferedAmount = () => 0;
+        cycleWorldFeed();
+        expect(v.last()).toMatchObject({ reset: 1, o: [{ ...item, c: 100 }] });
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'items', on: false }));
+        cycleWorldFeed();
+        expect(v.last().ro).toEqual([item.i]);
+    } finally {
+        obj.isActive = false;
+    }
+});
