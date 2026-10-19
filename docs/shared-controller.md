@@ -27,3 +27,7 @@ the initial reports' process memory readings are unaffected.
 The next potential memory reduction is consolidating headless game clients.
 They remain one process per bot in this change. Shared controller memory is
 shown once under All bots, separate from each bot's attributable client memory.
+
+The subsequent [shared-client optimization](shared-clients.md) consolidates the
+game-client processes as well. The figures above describe the earlier controller
+comparison.

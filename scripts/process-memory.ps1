@@ -17,7 +17,7 @@ $tracked = @{}
 foreach ($file in Get-ChildItem -LiteralPath $StateDirectory -Filter '*-process.json') {
     try {
         $record = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
-        if ($record.name -notmatch '^(engine|gateway|viewer|bot|routine|controller)(-[a-zA-Z0-9]{1,12})?$' -or
+        if ($record.name -notmatch '^(engine|gateway|viewer|bot|routine|controller|clients)(-[a-zA-Z0-9]{1,12})?$' -or
             $file.BaseName -ne ($record.name + '-process')) { continue }
         $entry = $byId[[int]$record.processId]
         if (!$entry -or !$record.startedAt -or
@@ -59,5 +59,11 @@ $os = Get-CimInstance Win32_OperatingSystem
         workingSetBytes=[long](($rows | Measure-Object workingSetBytes -Sum).Sum)
         privateBytes=[long](($rows | Measure-Object privateBytes -Sum).Sum)
     }
+    fleet=@{botCount=$(if ($config -and $config.botName) {
+        $count = 1
+        $manifest = Join-Path $StateDirectory 'fleet.json'
+        if (Test-Path -LiteralPath $manifest) { try { $count += @((Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json)).Count } catch {} }
+        $count
+    } else { 0 })}
     host=@{totalBytes=[long]$os.TotalVisibleMemorySize*1024;availableBytes=[long]$os.FreePhysicalMemory*1024}
 } | ConvertTo-Json -Depth 5 -Compress

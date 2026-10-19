@@ -14,7 +14,7 @@ PowerShell or Windows Terminal:
 ```
 
 Open http://localhost:3000 to watch. Start launches the engine, gateway, viewer,
-bot clients, and one shared controller; it reuses tracked processes.
+one shared client host, and one shared controller; it reuses tracked processes.
 Stop cancels all controller routines, requests a normal bot logout, waits for zero online players,
 then closes the managed services and the viewer's child processes. Combat blocks
 logout until 10 seconds after it ends; the launcher retries for up to 90 seconds
@@ -46,7 +46,7 @@ To choose explicitly:
 The launcher remembers the choice in `bots/local-watch/control-config.json`.
 Logs and process records are in `bots/local-watch/`; these are ignored by Git.
 Logs prints the last 25 lines of both output and error logs; choose
-`-Service engine|gateway|viewer|bot|routine|controller|logout`.
+`-Service engine|gateway|viewer|bot|routine|controller|clients|logout`.
 Without `-LogBot`, routine logs show the shared controller; `-LogBot` selects the
 individual bot's log. Status includes each supervised bot's role and training state.
 
@@ -81,7 +81,7 @@ Run the original bot plus nine training bots:
 
 The training functions run concurrently in `scripts/fleet-controller.ts`. Each bot
 has its own SDK connection, state, cancellation scope and retry loop. One process
-owns the shared collision map/pathfinder. Game clients remain separate processes.
+owns the shared collision map/pathfinder. Game sessions run in one shared client process by default.
 They keep their own skills, inventory and position. Low-HP bots eat available
 food; combat pauses at low HP when food runs out. Safe gathering can continue
 during natural healing. Fishing/mining bots drop their catches/ore when nearly full.
@@ -121,8 +121,10 @@ Click **Processes** in the viewer's bottom-right corner to see all managed
 services, bot clients/controllers and their child processes. It replaces Info.
 The table includes PIDs, working sets and private committed bytes, with totals
 and the machine's RAM usage. Expand **All bots** for per-bot client totals and
-the **Shared controller**, then expand a bot for its processes and PIDs. The
-shared controller is counted once in All bots; it is not charged to every bot.
+the **Shared clients** and **Shared controller** rows. Shared memory is counted
+once under All bots and cannot be attributed to individual characters. In separate
+client mode, expand a bot for its processes and PIDs. The bot count includes configured
+fleet members, including ones whose sessions have ended.
 Engine, gateway and viewer remain outside that total. Click column headings to sort.
 
 The Windows gateway samples on demand and shares a cached reading for five seconds.
@@ -170,3 +172,58 @@ whole controller, and synchronous pathfinding shares its CPU thread. This is a
 first memory optimization; it is not a validated 1,000-bot capacity claim.
 
 See [Shared-controller measurements](shared-controller.md) for the initial comparison.
+
+## Shared game clients
+
+The default is one client host for the configured fleet. Each character still has
+its own login, game socket, gateway connection, action queue, scene, inventory and
+skills. The Bun runtime, game definitions, base interfaces and immutable world
+location index are shared. The Windows cache path uses the user's home directory.
+
+Switch modes with:
+
+```powershell
+.\local.cmd start -ClientMode shared
+.\local.cmd start -ClientMode separate
+.\local.cmd logs -Service clients
+```
+
+The mode is remembered independently of ControllerMode. Switching client modes
+uses the normal logout/save/stop/start sequence because game sockets cannot move
+between processes. Changing only controller mode can reuse running clients.
+
+Shared clients must use the same SERVER and PROFANITY_FILTER settings. Preflight
+rejects incompatible settings before stopping services and restores the previous
+launcher configuration if validation fails. Use separate mode for mixed servers.
+
+Status includes each account's client state. Shared client logs contain the whole
+host; -Service bot (including -LogBot) selects those combined logs in shared mode.
+Routine logs remain per bot. Client session failures and intentional logouts affect
+only that account and do not automatically log it back in. Run start again to save
+and restart a host with ended sessions, or restart explicitly. Controller retries
+alone cannot restore an ended game-client session. A process crash affects all
+hosted clients. Normal stop still confirms saved logout before terminating the host.
+
+See [Shared-client measurements](shared-clients.md).
+
+## Expand to 100 accounts
+
+To keep the original ten and add nine more accounts to each routine:
+
+```powershell
+.\local.cmd stop
+bun scripts/expand-training-fleet.ts --per-role=10
+.\local.cmd start -ClientMode shared -ControllerMode shared
+```
+
+`--dry-run` previews the new names and assignments. The utility uses online-style
+handles, avoids existing bot folders, preserves current credentials and routines,
+and creates standalone watch.ts wrappers for new accounts. Running it again at
+the requested count adds nothing. The ten routines each have ten accounts;
+shared mode still uses one client host and one controller for all 100.
+
+The local roster is bots/local-watch/fleet.json plus the primary account in
+control-config.json. Account credentials and character saves remain local.
+Startup, tutorial completion, travel, resource contention and low-HP rests can
+make progress uneven across accounts; inspect their state and logs to check
+what a particular bot is doing.

@@ -20,6 +20,8 @@ export type FleetMember = {
   username: string;
   password: string;
   gatewayUrl: string;
+  host: string;
+  profanityFilter: boolean;
 };
 
 const readJson = (path: string) =>
@@ -76,6 +78,14 @@ export function loadFleet(root: string): FleetMember[] {
       username: env.BOT_USERNAME,
       password: env.PASSWORD,
       gatewayUrl,
+      host: env.SERVER || "localhost",
+      profanityFilter: !["false", "0", "off", "no"].includes(
+        (
+          env.PROFANITY_FILTER ??
+          process.env.PROFANITY_FILTER ??
+          ""
+        ).toLowerCase(),
+      ),
     };
   });
 }
