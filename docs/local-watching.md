@@ -56,3 +56,48 @@ commands.
 Edit `bots/<name>/watch.ts` to change the bot's behavior, then use `restart` to run
 the updated routine. This launcher does not freeze the simulation or edit XP,
 inventories or world state; those are separate server/game operations.
+
+## Five-bot training fleet
+
+Run the original bot plus four training bots:
+
+| Bot | Activity | Location |
+| --- | --- | --- |
+| KuUzmeFTw | Woodcutting | Lumbridge |
+| BladeBram | Attack and Hitpoints, fighting chickens | Lumbridge chicken farm |
+| PondPiper | Small-net fishing | Draynor shore, south of the dark wizards |
+| OreOtis | Copper/tin mining | Southeast Varrock mine |
+| EmberEtta | Firemaking; chops replacement logs | West of Lumbridge |
+
+The shared routine code is in `scripts/training.ts`. Each bot has its own
+`bots/<name>/watch.ts` entry point and separate client/controller processes.
+They keep their own skills, inventory and position. Low-HP bots eat available
+food; combat pauses at low HP when food runs out. Safe gathering can continue
+during natural healing. Fishing/mining bots drop their catches/ore when nearly full.
+
+To recreate the four extra accounts locally without committing credentials:
+
+```powershell
+bun scripts/setup-training-fleet.ts
+.\local.cmd start
+.\local.cmd status
+.\local.cmd logs -Service routine -LogBot PondPiper
+.\local.cmd stop
+```
+
+The extra bots are listed in `bots/local-watch/fleet.json`.
+The regular start/stop/restart/status commands include all listed bots.
+Stop ends all routines before logging out the five characters and stopping
+the server. Credentials and character saves stay local.
+
+To repeat a resource sample while the bots are actively training:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-local.ps1 -Label five-bots -Seconds 30
+```
+
+Reports are saved under `bots/local-watch/benchmarks/`. They include average
+and peak resident memory, private memory allocations, CPU usage, and before/after
+skill XP. Viewer development-server children are counted as shared overhead.
+Browser/GPU usage is outside the report. These short samples are comparisons of
+this workload, not maximum fleet capacity or a linear scaling guarantee.

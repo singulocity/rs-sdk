@@ -4,6 +4,7 @@ param(
     [string]$Action = 'status',
     [string]$BotName,
     [string]$ViewerPath,
+    [string]$LogBot,
     [ValidateSet('engine', 'gateway', 'viewer', 'bot', 'routine', 'logout')]
     [string]$Service = 'routine'
 )
@@ -21,6 +22,7 @@ Commands:
   logs      Show the last 25 lines of output and errors (default: routine).
 
 Options:
+  -LogBot      Select a fleet bot for bot/routine/logout logs.
   -Service     engine | gateway | viewer | bot | routine | logout
                Select which logs to display.
   -BotName     Choose the bot when starting; the choice is remembered.
@@ -30,9 +32,11 @@ Examples:
   .\local.cmd status
   .\local.cmd stop
   .\local.cmd logs -Service engine
+  .\local.cmd logs -Service routine -LogBot PondPiper
   .\local.cmd start -BotName KuUzmeFTw -ViewerPath C:\Users\jblac\Github\rs-world
 
 Viewer: http://localhost:3000
+Start, stop, and status include additional bots in bots/local-watch/fleet.json.
 Closing the browser or terminal does not stop the background services.
 Stop retries logout for up to 90 seconds if combat blocks it.
 If logout cannot complete, the server stays running to preserve progress.
@@ -72,6 +76,27 @@ $specs = @{
     routine = @{ cwd = $repoRoot; entry = $routineFile; pattern = [regex]::Escape([IO.Path]::GetFileName($routineFile)); port = 0 }
 }
 $serviceNames = @('engine', 'gateway', 'viewer', 'bot', 'routine')
+$specs.bot.botName = $BotName
+$specs.routine.botName = $BotName
+$botGroups = @(@{name=$BotName;client='bot';routine='routine';logout='logout'})
+$fleetFile = Join-Path $stateDir 'fleet.json'
+if (Test-Path -LiteralPath $fleetFile) {
+    $seen = @($BotName)
+    $members = Get-Content -LiteralPath $fleetFile -Raw | ConvertFrom-Json
+    foreach ($member in $members) {
+        $name = [string]$member.name
+        if ($name -notmatch '^[a-zA-Z0-9]{1,12}$' -or $name -in $seen) { throw "Invalid or duplicate fleet bot: $name" }
+        $seen += $name
+        $clientKey = 'bot-' + $name
+        $routineKey = 'routine-' + $name
+        $entry = Join-Path $repoRoot ("bots/" + $name + "/watch.ts")
+        $specs[$clientKey] = @{cwd=Join-Path $repoRoot 'server/webclient';entry='src/lite/runner.ts';pattern='src[\\/]lite[\\/]runner\.ts';port=0;botName=$name}
+        $specs[$routineKey] = @{cwd=$repoRoot;entry=$entry;pattern=[regex]::Escape($entry);port=0;botName=$name}
+        $botGroups += @{name=$name;client=$clientKey;routine=$routineKey;logout='logout-'+$name}
+        $serviceNames += $clientKey, $routineKey
+    }
+}
+
 
 function Get-ManagedProcess([string]$Name) {
     $file = Join-Path $stateDir ($Name + '-process.json')
@@ -134,7 +159,7 @@ function Start-LocalService([string]$Name) {
     $exe = if ($Name -eq 'viewer') { (Get-Command node.exe -ErrorAction Stop).Source } else { Get-BunPath }
     $arguments = @($entry)
     if ($Name -eq 'viewer') { $arguments += 'start' }
-    if ($Name -eq 'bot' -or $Name -eq 'routine') { $arguments += $BotName }
+    if ($spec.botName) { $arguments += $spec.botName }
     $quoted = @($arguments | ForEach-Object { '"' + $_ + '"' })
     $process = Start-Process -FilePath $exe -ArgumentList $quoted -WorkingDirectory $spec.cwd -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir ($Name + '.out.log')) -RedirectStandardError (Join-Path $logDir ($Name + '.err.log'))
     $started = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
@@ -168,33 +193,47 @@ function Show-Status {
             PID = $(if ($process) { $process.ProcessId } else { '-' }); Port = $(if ($specs[$name].port) { $specs[$name].port } else { '-' }) }
     }
     $rows | Format-Table -AutoSize | Out-Host
-    Write-Host "Bot: $BotName"
+    Write-Host ("Bots: " + (($botGroups | ForEach-Object { $_.name }) -join ", "))
     Write-Host 'Viewer: http://localhost:3000'
     Write-Host "Logs: $logDir"
 }
 
+function Start-BotGroup($Group) {
+    Start-LocalService $Group.client
+    $ready = $false
+    $deadline = [datetime]::UtcNow.AddSeconds(40)
+    do {
+        try {
+            $state = Invoke-RestMethod ("http://127.0.0.1:7780/state/" + $Group.name) -TimeoutSec 2
+            if ($state.botStatus -eq 'active' -and $state.state) { $ready = $true; break }
+        } catch {}
+        if (!(Get-ManagedProcess $Group.client)) { throw ("Bot exited: " + $Group.name) }
+        Start-Sleep -Milliseconds 500
+    } while ([datetime]::UtcNow -lt $deadline)
+    if (!$ready) { throw ("Bot did not connect: " + $Group.name) }
+    Start-LocalService $Group.routine
+}
+
 function Stop-Stack {
-    Stop-LocalService 'routine'
+    foreach ($group in $botGroups) { Stop-LocalService $group.routine }
     if (Get-ManagedProcess 'engine') {
-        if (Get-ManagedProcess 'bot') {
-            Write-Host 'Logging the bot out and waiting for its character save...'
+        foreach ($group in $botGroups) {
+            if (!(Get-ManagedProcess $group.client)) { continue }
+            Write-Host ("Logging out " + $group.name + " and waiting for its character save...")
             $logout = Join-Path $repoRoot 'scripts/local-logout.ts'
-            $arguments = @($logout, $BotName) | ForEach-Object { '"' + $_ + '"' }
-            $job = Start-Process -FilePath (Get-BunPath) -ArgumentList $arguments -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir 'logout.out.log') -RedirectStandardError (Join-Path $logDir 'logout.err.log')
+            $arguments = @($logout, $group.name) | ForEach-Object { '"' + $_ + '"' }
+            $job = Start-Process -FilePath (Get-BunPath) -ArgumentList $arguments -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir ($group.logout + '.out.log')) -RedirectStandardError (Join-Path $logDir ($group.logout + '.err.log'))
             $logoutDeadline = [datetime]::UtcNow.AddSeconds(120)
             $elapsedSeconds = 0
             while (!$job.WaitForExit(1000) -and [datetime]::UtcNow -lt $logoutDeadline) {
                 $elapsedSeconds++
-                if ($elapsedSeconds % 5 -eq 0) {
-                    Write-Host "Still waiting for confirmed logout ($elapsedSeconds seconds). Combat can delay logout."
-                }
+                if ($elapsedSeconds % 5 -eq 0) { Write-Host ("Waiting for " + $group.name + " logout ($elapsedSeconds seconds); combat can delay it.") }
             }
             if (!$job.HasExited) {
                 $job.Kill()
-                throw 'Logout timed out. Server was left running. Check local.cmd logs -Service logout'
+                throw 'Logout timed out. Server was left running. Check logout logs.'
             }
-            # Confirm completed logout from the server below, not the helper's exit status.
-            Get-Content -LiteralPath (Join-Path $logDir 'logout.out.log') -Tail 1 | Out-Host
+            Get-Content -LiteralPath (Join-Path $logDir ($group.logout + '.out.log')) -Tail 1 | Out-Host
         }
         $deadline = [datetime]::UtcNow.AddSeconds(25)
         $empty = $false
@@ -207,14 +246,21 @@ function Stop-Stack {
         } while ([datetime]::UtcNow -lt $deadline)
         if (!$empty) { throw 'Players are still connected or the server is not responding. Server was left running; check logout logs and log out other clients before stopping.' }
     }
-    foreach ($name in @('bot', 'viewer', 'engine', 'gateway')) { Stop-LocalService $name }
+    foreach ($group in $botGroups) { Stop-LocalService $group.client }
+    foreach ($name in @('viewer', 'engine', 'gateway')) { Stop-LocalService $name }
     Write-Host 'Local setup stopped. Saved characters and databases are preserved.'
 }
 
 try {
     if ($Action -eq 'status') { Show-Status; exit 0 }
     if ($Action -eq 'logs') {
-        $paths = @((Join-Path $logDir ($Service + '.out.log')), (Join-Path $logDir ($Service + '.err.log')))
+        $logKey = $Service
+        if ($LogBot) {
+            $group = $botGroups | Where-Object { $_.name -eq $LogBot } | Select-Object -First 1
+            if (!$group -or $Service -notin @('bot','routine','logout')) { throw 'Choose a configured -LogBot with -Service bot, routine, or logout.' }
+            $logKey = switch ($Service) { 'bot' {$group.client} 'routine' {$group.routine} 'logout' {$group.logout} }
+        }
+        $paths = @((Join-Path $logDir ($logKey + '.out.log')), (Join-Path $logDir ($logKey + '.err.log')))
         foreach ($path in $paths) {
             Write-Host $path
             if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Tail 25 }
@@ -225,6 +271,10 @@ try {
     if ($Action -eq 'start' -or $Action -eq 'restart') {
         if (!(Test-Path -LiteralPath (Join-Path $botDir 'bot.env'))) { throw "Missing bot credentials in $botDir" }
         if (!(Test-Path -LiteralPath $routineFile)) { throw 'Create watch.ts or script.ts in the bot folder first.' }
+        foreach ($group in $botGroups) {
+            $envPath = Join-Path $repoRoot ("bots/" + $group.name + "/bot.env")
+            if (!(Test-Path -LiteralPath $envPath) -or !(Test-Path -LiteralPath $specs[$group.routine].entry)) { throw ("Missing credentials or routine for " + $group.name) }
+        }
         $null = New-Item -ItemType Directory -Path $logDir -Force
         @{ botName = $BotName; viewerPath = $ViewerPath } | ConvertTo-Json | Set-Content -LiteralPath $configFile
         $env:WORLD_FEED = 'true'
@@ -240,19 +290,7 @@ try {
         Wait-Http 'gateway' 'http://127.0.0.1:7780/' 30
         Start-LocalService 'viewer'
         Wait-Http 'viewer' 'http://127.0.0.1:3000'
-        Start-LocalService 'bot'
-        $ready = $false
-        $deadline = [datetime]::UtcNow.AddSeconds(40)
-        do {
-            try {
-                $state = Invoke-RestMethod ("http://127.0.0.1:7780/state/" + $BotName) -TimeoutSec 2
-                if ($state.botStatus -eq 'active' -and $state.state) { $ready = $true; break }
-            } catch {}
-            if (!(Get-ManagedProcess 'bot')) { throw 'Bot exited. Check local.cmd logs -Service bot' }
-            Start-Sleep -Milliseconds 500
-        } while ([datetime]::UtcNow -lt $deadline)
-        if (!$ready) { throw 'Bot did not connect. Check local.cmd logs -Service bot' }
-        Start-LocalService 'routine'
+        foreach ($group in $botGroups) { Start-BotGroup $group }
         Show-Status
     }
 } catch {
