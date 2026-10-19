@@ -13,6 +13,8 @@
 // quiet without closing. A single bad packet is not an ending; see handlePacket.
 
 import './dom-shim.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { loginJitterMs } from './LoginBackoff.js';
 
 import { invalidateCache, loadCache } from './cache.js';
@@ -106,7 +108,7 @@ export async function startSession(opts: SessionOptions): Promise<LiteSession> {
     }
     const secured = opts.secured ?? !(opts.host.startsWith('localhost') || opts.host.startsWith('127.'));
     const origin = `${secured ? 'https' : 'http'}://${opts.host}`;
-    const cacheDir = opts.cacheDir ?? `${process.env.HOME}/.cache/rs-sdk-lite`;
+    const cacheDir = opts.cacheDir ?? join(homedir(), '.cache', 'rs-sdk-lite');
 
     // Fail with the fix, not a decode error or an opaque login response 6, when the server
     // has moved to another revision. Servers without /api/version skip the check.

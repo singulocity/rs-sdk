@@ -4,6 +4,7 @@ export interface MemorySnapshot {
     sampledAt: string;
     processes: { service: string; botName?: string | null; pid: number; workingSetBytes: number; privateBytes: number }[];
     totals: { processCount: number; workingSetBytes: number; privateBytes: number };
+    fleet?: { botCount: number };
     host: { totalBytes: number; availableBytes: number };
 }
 

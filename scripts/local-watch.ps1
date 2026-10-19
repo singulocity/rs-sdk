@@ -7,7 +7,9 @@ param(
     [string]$LogBot,
     [ValidateSet('shared', 'separate')]
     [string]$ControllerMode,
-    [ValidateSet('engine', 'gateway', 'viewer', 'bot', 'routine', 'controller', 'logout')]
+    [ValidateSet('shared', 'separate')]
+    [string]$ClientMode,
+    [ValidateSet('engine', 'gateway', 'viewer', 'bot', 'routine', 'controller', 'clients', 'logout')]
     [string]$Service = 'routine'
 )
 
@@ -25,8 +27,9 @@ Commands:
 
 Options:
   -LogBot      Select a fleet bot for bot/routine/logout logs.
-  -Service     engine | gateway | viewer | bot | routine | controller | logout
+  -Service     engine | gateway | viewer | bot | routine | controller | clients | logout
                Select which logs to display.
+  -ClientMode shared (default) | separate; the choice is remembered.
   -ControllerMode shared (default) | separate; the choice is remembered.
   -BotName     Choose the bot when starting; the choice is remembered.
   -ViewerPath  Path to your rs-world checkout; the choice is remembered.
@@ -53,6 +56,7 @@ $stateDir = Join-Path $repoRoot 'bots/local-watch'
 $logDir = Join-Path $stateDir 'logs'
 $configFile = Join-Path $stateDir 'control-config.json'
 $config = if (Test-Path -LiteralPath $configFile) { Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json } else { $null }
+if (!$ClientMode) { $ClientMode = if ($config -and $config.clientMode) { $config.clientMode } elseif ($Action -in @('start','restart')) { 'shared' } else { 'separate' } }
 if (!$ControllerMode) { $ControllerMode = if ($config -and $config.controllerMode) { $config.controllerMode } else { 'shared' } }
 if (!$BotName) {
     if ($config) { $BotName = $config.botName }
@@ -77,10 +81,12 @@ $specs = @{
     gateway = @{ cwd = Join-Path $repoRoot 'server/gateway'; entry = 'gateway.ts'; pattern = 'gateway\.ts'; port = 7780 }
     viewer = @{ cwd = $ViewerPath; entry = 'node_modules/@craco/craco/dist/bin/craco.js'; pattern = '[\\/]craco[\\/].*\bstart\b'; port = 3000 }
     bot = @{ cwd = Join-Path $repoRoot 'server/webclient'; entry = 'src/lite/runner.ts'; pattern = 'src[\\/]lite[\\/]runner\.ts'; port = 0 }
+    clients = @{ cwd = Join-Path $repoRoot 'server/webclient'; entry = 'src/lite/fleet-runner.ts'; pattern = 'src[\\/]lite[\\/]fleet-runner\.ts'; port = 0 }
     controller = @{ cwd = $repoRoot; entry = 'scripts/fleet-controller.ts'; pattern = 'scripts[\\/]fleet-controller\.ts'; port = 0 }
     routine = @{ cwd = $repoRoot; entry = $routineFile; pattern = [regex]::Escape([IO.Path]::GetFileName($routineFile)); port = 0 }
 }
-$serviceNames = @('engine', 'gateway', 'viewer', 'bot')
+$serviceNames = @('engine', 'gateway', 'viewer')
+$serviceNames += $(if ($ClientMode -eq 'shared') { 'clients' } else { 'bot' })
 $serviceNames += $(if ($ControllerMode -eq 'shared') { 'controller' } else { 'routine' })
 $specs.bot.botName = $BotName
 $specs.routine.botName = $BotName
@@ -99,7 +105,7 @@ if (Test-Path -LiteralPath $fleetFile) {
         $specs[$clientKey] = @{cwd=Join-Path $repoRoot 'server/webclient';entry='src/lite/runner.ts';pattern='src[\\/]lite[\\/]runner\.ts';port=0;botName=$name}
         $specs[$routineKey] = @{cwd=$repoRoot;entry=$entry;pattern=[regex]::Escape($entry);port=0;botName=$name}
         $botGroups += @{name=$name;client=$clientKey;routine=$routineKey;logout='logout-'+$name}
-        $serviceNames += $clientKey
+        if ($ClientMode -eq 'separate') { $serviceNames += $clientKey }
         if ($ControllerMode -eq 'separate') { $serviceNames += $routineKey }
     }
 }
@@ -240,13 +246,22 @@ function Show-Status {
             } | Format-Table -AutoSize | Out-Host
         } catch {}
     }
+    if ($ClientMode -eq 'shared' -and (Get-ManagedProcess 'clients')) {
+        try {
+            $status = Get-Content -LiteralPath (Join-Path $stateDir 'clients-status.json') -Raw | ConvertFrom-Json
+            $status.bots.PSObject.Properties | ForEach-Object {
+                [pscustomobject]@{Bot=$_.Name;Client=$_.Value.state}
+            } | Format-Table -AutoSize | Out-Host
+        } catch {}
+    }
     Write-Host ("Bots: " + (($botGroups | ForEach-Object { $_.name }) -join ", "))
     Write-Host 'Viewer: http://localhost:3000'
     Write-Host "Logs: $logDir"
 }
 
 function Start-BotGroup($Group) {
-    Start-LocalService $Group.client
+    $clientService = if ($ClientMode -eq 'shared') { 'clients' } else { $Group.client }
+    if (!(Get-ManagedProcess $clientService)) { Start-LocalService $clientService }
     $ready = $false
     $deadline = [datetime]::UtcNow.AddSeconds(40)
     do {
@@ -254,7 +269,7 @@ function Start-BotGroup($Group) {
             $state = Invoke-RestMethod ("http://127.0.0.1:7780/state/" + $Group.name) -TimeoutSec 2
             if ($state.botStatus -eq 'active' -and $state.state) { $ready = $true; break }
         } catch {}
-        if (!(Get-ManagedProcess $Group.client)) { throw ("Bot exited: " + $Group.name) }
+        if (!(Get-ManagedProcess $clientService)) { throw ("Bot exited: " + $Group.name) }
         Start-Sleep -Milliseconds 500
     } while ([datetime]::UtcNow -lt $deadline)
     if (!$ready) { throw ("Bot did not connect: " + $Group.name) }
@@ -265,23 +280,30 @@ function Stop-Stack {
     Stop-Controller
     foreach ($group in $botGroups) { Stop-LocalService $group.routine }
     if (Get-ManagedProcess 'engine') {
-        foreach ($group in $botGroups) {
-            if (!(Get-ManagedProcess $group.client)) { continue }
-            Write-Host ("Logging out " + $group.name + " and waiting for its character save...")
-            $logout = Join-Path $repoRoot 'scripts/local-logout.ts'
-            $arguments = @($logout, $group.name) | ForEach-Object { '"' + $_ + '"' }
-            $job = Start-Process -FilePath (Get-BunPath) -ArgumentList $arguments -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir ($group.logout + '.out.log')) -RedirectStandardError (Join-Path $logDir ($group.logout + '.err.log'))
-            $logoutDeadline = [datetime]::UtcNow.AddSeconds(120)
+        # One process logs every bot out concurrently (bounded by LOGOUT_CONCURRENCY, default 250)
+        # instead of one sequential bun process per bot.
+        if ((@($botGroups | Where-Object { Get-ManagedProcess $_.client }).Count -gt 0) -or (Get-ManagedProcess 'clients')) {
+            Write-Host 'Logging out all bots in parallel and waiting for character saves...'
+            $logoutAll = Join-Path $repoRoot 'scripts/local-logout-all.ts'
+            $job = Start-Process -FilePath (Get-BunPath) -ArgumentList @('"' + $logoutAll + '"') -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir 'logout-all.out.log') -RedirectStandardError (Join-Path $logDir 'logout-all.err.log')
+            $logoutDeadline = [datetime]::UtcNow.AddSeconds(300)
             $elapsedSeconds = 0
             while (!$job.WaitForExit(1000) -and [datetime]::UtcNow -lt $logoutDeadline) {
                 $elapsedSeconds++
-                if ($elapsedSeconds % 5 -eq 0) { Write-Host ("Waiting for " + $group.name + " logout ($elapsedSeconds seconds); combat can delay it.") }
+                if ($elapsedSeconds % 5 -eq 0) { Write-Host ("Waiting for logouts ($elapsedSeconds seconds); combat can delay them.") }
             }
             if (!$job.HasExited) {
                 $job.Kill()
-                throw 'Logout timed out. Server was left running. Check logout logs.'
+                throw 'Logout timed out. Server was left running. Check logs -Service logout-all.'
             }
-            Get-Content -LiteralPath (Join-Path $logDir ($group.logout + '.out.log')) -Tail 1 | Out-Host
+            $job.WaitForExit()  # without this, ExitCode can read as $null after a timed WaitForExit
+            Get-Content -LiteralPath (Join-Path $logDir 'logout-all.out.log') -Tail 1 | Out-Host
+            # Trust the script's own success line: Start-Process exit codes read back unreliably on Windows.
+            $outTail = @(Get-Content -LiteralPath (Join-Path $logDir 'logout-all.out.log') -Tail 3) -join "`n"
+            if ($outTail -notmatch 'Logout confirmed for all \d+ bots') {
+                Get-Content -LiteralPath (Join-Path $logDir 'logout-all.err.log') -Tail 10 | Out-Host
+                throw "Some bots could not be confirmed logged out (exit code $($job.ExitCode)). Server left running; see bots/local-watch/logs/logout-all.err.log."
+            }
         }
         $deadline = [datetime]::UtcNow.AddSeconds(25)
         $empty = $false
@@ -295,6 +317,7 @@ function Stop-Stack {
         if (!$empty) { throw 'Players are still connected or the server is not responding. Server was left running; check logout logs and log out other clients before stopping.' }
     }
     foreach ($group in $botGroups) { Stop-LocalService $group.client }
+    Stop-LocalService 'clients'
     foreach ($name in @('viewer', 'engine', 'gateway')) { Stop-LocalService $name }
     Write-Host 'Local setup stopped. Saved characters and databases are preserved.'
 }
@@ -308,6 +331,7 @@ try {
             if (!$group -or $Service -notin @('bot','routine','logout')) { throw 'Choose a configured -LogBot with -Service bot, routine, or logout.' }
             $logKey = switch ($Service) { 'bot' {$group.client} 'routine' {$group.routine} 'logout' {$group.logout} }
         }
+        if ($Service -eq 'bot' -and $ClientMode -eq 'shared') { $logKey = 'clients' }
         $paths = @((Join-Path $logDir ($logKey + '.out.log')), (Join-Path $logDir ($logKey + '.err.log')))
         foreach ($path in $paths) {
             Write-Host $path
@@ -325,12 +349,36 @@ try {
         }
         $null = New-Item -ItemType Directory -Path $logDir -Force
         $primaryRole = if ($config -and $config.primaryRole) { $config.primaryRole } else { 'woodcutting' }
-        @{ botName = $BotName; viewerPath = $ViewerPath; controllerMode=$ControllerMode; primaryRole=$primaryRole } | ConvertTo-Json | Set-Content -LiteralPath $configFile
+        $previousConfig = if (Test-Path -LiteralPath $configFile) { [IO.File]::ReadAllText($configFile) } else { $null }
+        try {
+            @{ botName = $BotName; viewerPath = $ViewerPath; controllerMode=$ControllerMode; clientMode=$ClientMode; primaryRole=$primaryRole } | ConvertTo-Json | Set-Content -LiteralPath $configFile
+            if ($ClientMode -eq 'shared') {
+                Push-Location (Join-Path $repoRoot 'server/webclient')
+                try {
+                    & (Get-BunPath) src/lite/fleet-runner.ts --check
+                    if ($LASTEXITCODE -ne 0) { throw 'Shared-client preflight failed; running clients were left running.' }
+                } finally { Pop-Location }
+            }
+            if ($ControllerMode -eq 'shared') {
+                & (Get-BunPath) (Join-Path $repoRoot 'scripts/fleet-controller.ts') --check
+                if ($LASTEXITCODE -ne 0) { throw 'Shared-controller preflight failed; existing routines were left running.' }
+            }
+        } catch {
+            if ($null -ne $previousConfig) { [IO.File]::WriteAllText($configFile, $previousConfig) }
+            else { Remove-Item -LiteralPath $configFile }
+            throw
+        }
         if ($ControllerMode -eq 'shared') {
-            & (Get-BunPath) (Join-Path $repoRoot 'scripts/fleet-controller.ts') --check
-            if ($LASTEXITCODE -ne 0) { throw 'Shared-controller preflight failed; existing routines were left running.' }
             foreach ($group in $botGroups) { Stop-LocalService $group.routine }
         } else { Stop-Controller }
+        $differentClients = if ($ClientMode -eq 'shared') { @($botGroups | Where-Object { Get-ManagedProcess $_.client }).Count -gt 0 } else { [bool](Get-ManagedProcess 'clients') }
+        if (!$differentClients -and $ClientMode -eq 'shared' -and (Get-ManagedProcess 'clients')) {
+            try {
+                $clientStatus = Get-Content -LiteralPath (Join-Path $stateDir 'clients-status.json') -Raw | ConvertFrom-Json
+                $differentClients = @($clientStatus.bots.PSObject.Properties | Where-Object { $_.Value.state -in @('logged-out','failed','stopped') }).Count -gt 0
+            } catch {}
+        }
+        if ($differentClients) { Write-Host 'Changing client sessions: saving and restarting the managed stack.'; Stop-Stack }
         $env:WORLD_FEED = 'true'
         $env:EASY_STARTUP = 'true'
         $env:BUILD_VERIFY = 'false'

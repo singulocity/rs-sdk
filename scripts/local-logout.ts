@@ -12,21 +12,23 @@ export async function logoutWithConfirmation({
     request, isLoggedOut, wait = Bun.sleep, now = Date.now, timeoutMs = 90000,
 }: LogoutAttempt): Promise<void> {
     const deadline = now() + timeoutMs;
+    let lastError: unknown;
     while (now() < deadline) {
         if (await isLoggedOut()) return;
         try {
             await request();
         } catch (error) {
-            // The client can disconnect between our check and the button request.
-            if (await isLoggedOut()) return;
-            throw error;
+            // The client can disconnect between our check and the button request, and the
+            // gateway may take a moment to report it dead. Keep polling instead of failing.
+            lastError = error;
         }
         for (let poll = 0; poll < 4 && now() < deadline; poll++) {
             await wait(500);
             if (await isLoggedOut()) return;
         }
     }
-    throw new Error('Logout was not confirmed within 90 seconds. Combat or another game restriction may still be blocking it; the server will remain running.');
+    const detail = lastError instanceof Error ? ' Last error: ' + lastError.message : '';
+    throw new Error('Logout was not confirmed within 90 seconds. Combat or another game restriction may still be blocking it; the server will remain running.' + detail);
 }
 
 if (import.meta.main) {

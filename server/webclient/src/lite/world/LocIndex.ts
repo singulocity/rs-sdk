@@ -115,7 +115,22 @@ export class LocIndex {
      * Build from the server's /ondemand.zip + versionlist archive, using a disk
      * cache keyed by the versionlist CRC (which changes whenever maps repack).
      */
-    static async load(opts: { origin: string; cacheDir: string; versionlistCrc: number; quiet?: boolean }): Promise<LocIndex> {
+    private static shared = new Map<string, Promise<LocIndex>>();
+
+    static load(opts: { origin: string; cacheDir: string; versionlistCrc: number; quiet?: boolean }): Promise<LocIndex> {
+        const key = `${opts.origin}|${opts.versionlistCrc >>> 0}`;
+        const existing = this.shared.get(key);
+        if (existing) return existing;
+        this.shared.clear();
+        const pending = this.loadUncached(opts).catch(error => {
+            if (this.shared.get(key) === pending) this.shared.delete(key);
+            throw error;
+        });
+        this.shared.set(key, pending);
+        return pending;
+    }
+
+    private static async loadUncached(opts: { origin: string; cacheDir: string; versionlistCrc: number; quiet?: boolean }): Promise<LocIndex> {
         const log = opts.quiet ? () => {} : (m: string) => console.log(`[lite:locs] ${m}`);
         const cachePath = `${opts.cacheDir}/locindex-${opts.versionlistCrc >>> 0}.bin`;
 
