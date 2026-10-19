@@ -281,6 +281,7 @@ try {
         $env:EASY_STARTUP = 'true'
         $env:BUILD_VERIFY = 'false'
         $env:GATEWAY_HOSTNAME = '127.0.0.1'
+        $env:LOCAL_PROCESS_METRICS = 'true'
         $env:BROWSER = 'none'
         $env:HOST = '127.0.0.1'
         $env:PORT = '3000'

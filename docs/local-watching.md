@@ -108,3 +108,23 @@ Browser/GPU usage is outside the report. These short samples are comparisons of
 this workload, not maximum fleet capacity or a linear scaling guarantee.
 
 See [Skill coverage](training-skills.md) for the 19 enabled skills and remaining training roles.
+
+## Process memory dashboard
+
+Click **Processes** in the viewer's bottom-right corner to see all managed
+services, bot clients/controllers and their child processes. It replaces Info.
+The table includes PIDs, working sets and private committed bytes, with totals
+and the machine's RAM usage. Click column headings to sort.
+
+The Windows gateway samples on demand and shares a cached reading for five seconds.
+Closing the panel stops polling. Browser/GPU memory is excluded; working-set
+sums can double-count shared pages, and private committed memory may be paged out.
+On sampling failure the last good reading stays visible with a warning.
+
+`local.cmd start` enables the loopback-only `GET http://localhost:7780/local/metrics`
+endpoint using `LOCAL_PROCESS_METRICS=true`. Existing gateway processes need one
+restart to load the new endpoint. The sampler reads process records and verifies
+their creation time to exclude stale/reused PIDs; it does not expose command lines.
+
+Drag the character inspector by its title to reposition it. The title also accepts
+arrow keys when focused. It stays within the window when dragged or resized.
