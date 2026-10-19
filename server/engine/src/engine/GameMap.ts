@@ -108,6 +108,11 @@ export default class GameMap {
         return this.freemap.has(ZoneMap.zoneIndex(x, z, 0)); // level does not matter here.
     }
 
+    // Spectator reads must not create zones while moving the camera.
+    findZone(x: number, z: number, level: number): Zone | undefined {
+        return this.zonemap.findZone(x, z, level);
+    }
+
     getZone(x: number, z: number, level: number): Zone {
         return this.zonemap.zone(x, z, level);
     }

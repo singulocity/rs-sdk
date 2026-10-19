@@ -270,3 +270,67 @@ test('inspection preserves slots and counts, uses real XP units, and tracks name
         getItem.mockRestore();
     }
 });
+
+test('ground items opt in, track stacks, pickups, respawns and camera changes without mutating zones', async () => {
+    const { default: Obj } = await import('../../src/engine/entity/Obj.js');
+    const { EntityLifeCycle } = await import('../../src/engine/entity/EntityLifeCycle.js');
+    World.currentTick = 100;
+    const v = viewer(AREA);
+    const legacy = viewer(AREA);
+    const obj = new Obj(2, 3210, 3210, EntityLifeCycle.RESPAWN, 995, 25);
+    const zone = World.gameMap.getZone(obj.x, obj.z, obj.level);
+    zone.addStaticObj(obj);
+    obj.receiver64 = 123n;
+    obj.reveal = 100;
+    try {
+        cycleWorldFeed();
+        expect(v.last().o).toBeUndefined();
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'items', on: true }));
+        const zonesBefore = World.gameMap.getTotalZones();
+        cycleWorldFeed();
+        const item = v.last().o[0];
+        expect(item).toEqual({ i: expect.any(Number), t: 995, c: 25, x: 3210, z: 3210, l: 2 });
+        expect(legacy.last().o).toBeUndefined();
+        expect(World.gameMap.getTotalZones()).toBe(zonesBefore);
+        expect(obj.reveal).toBe(100);
+        expect(obj.receiver64).toBe(123n);
+        endTick();
+        cycleWorldFeed();
+        expect(v.last().o).toBeUndefined();
+        endTick();
+        obj.count = 100;
+        cycleWorldFeed();
+        expect(v.last().o).toEqual([{ ...item, c: 100 }]);
+        endTick();
+        obj.isActive = false; // pickup/despawn
+        cycleWorldFeed();
+        expect(v.last().ro).toEqual([item.i]);
+        endTick();
+        obj.isActive = true; // static spawn returns
+        cycleWorldFeed();
+        expect(v.last().o).toEqual([{ ...item, c: 100 }]);
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'sub', x: 1000, z: 1000, w: 64, h: 64 }));
+        cycleWorldFeed();
+        expect(v.last().ro).toEqual([item.i]);
+        expect(World.gameMap.getTotalZones()).toBe(zonesBefore);
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'sub', ...AREA }));
+        cycleWorldFeed();
+        expect(v.last().o[0].i).toBe(item.i);
+        endTick();
+        v.ws.getBufferedAmount = () => 2 << 20;
+        cycleWorldFeed();
+        endTick();
+        v.ws.getBufferedAmount = () => 0;
+        cycleWorldFeed();
+        expect(v.last()).toMatchObject({ reset: 1, o: [{ ...item, c: 100 }] });
+        endTick();
+        onWorldFeedMessage(v.ws, JSON.stringify({ t: 'items', on: false }));
+        cycleWorldFeed();
+        expect(v.last().ro).toEqual([item.i]);
+    } finally {
+        obj.isActive = false;
+    }
+});

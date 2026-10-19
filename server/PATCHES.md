@@ -390,6 +390,16 @@ Upgrade hazards:
 
 ---
 
+## Live ground items
+
+- [ ] **`engine/src/web/worldfeed.ts`** — optional `{t:"items",on:true}` subscription;
+      tick `o` records are `{i,t,c,x,z,l}`, `ro` removes stable object IDs. Includes
+      private drops for spectators and active static spawns; follows stack changes,
+      pickups, respawns, camera subscriptions and slow-client resets.
+- [ ] **`GameMap.findZone` / `ZoneMap.findZone`** — read-only zone lookup for spectator
+      item scans; viewing empty areas must never allocate game zones.
+      Verify with `bun test test/worldfeed.test.ts` from `server/engine`.
+
 ## Cross-boundary invariants (how things actually break)
 
 These are the rules derived from every severed-wire bug found so far:

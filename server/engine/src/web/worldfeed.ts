@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from 'bun';
 
+import type Obj from '#/engine/entity/Obj.js';
 import Npc from '#/engine/entity/Npc.js';
 import Player, { getExpByLevel } from '#/engine/entity/Player.js';
 import InvType from '#/cache/config/InvType.js';
@@ -29,10 +30,11 @@ import type { WebSocketData } from './websocket.js';
 //
 // Protocol (JSON text frames, see WORLD_FEED_VERSION):
 //   client -> {t:'sub', x, z, w, h}     subscribe to tiles [x, x+w) x [z, z+h), all levels
+//             {t:'items', on}          opt in to live ground items (including private drops)
 //             {t:'inspect', name}      watch one player's inventory/skills; null stops
 //             {t:'roster', on}          toggle the all-player roster
 //   server -> {t:'hello', v, rev, tick, tickMs, players}
-//             {t:'tick', k, ms, p?, n?, rp?, rn?, reset?}  once per tick while subscribed
+//             {t:'tick', k, ms, p?, n?, o?, rp?, rn?, ro?, reset?}  once per tick while subscribed
 //             {t:'roster', k, p: [[slot, name, x, z, level, combat], ...], npcs}
 //
 // Entity records (keys only present when relevant):
@@ -74,6 +76,10 @@ type Position = { x: number; z: number; level: number };
 // undefined = not computed yet, null = nothing to send.
 type RecordJson = { full?: string | null; delta?: string | null };
 
+type GroundItem = { i: number; t: number; c: number; x: number; z: number; l: number };
+const groundItemIds = new WeakMap<Obj, number>();
+let nextGroundItemId = 1;
+
 type Subscriber = {
     ws: ServerWebSocket<WebSocketData>;
     x0: number;
@@ -82,6 +88,8 @@ type Subscriber = {
     z1: number;
     subscribed: boolean;
     roster: boolean;
+    items: boolean;
+    groundItems: Map<number, GroundItem>;
     inspectName: string | null;
     inspectedAt: number;
     resync: boolean;
@@ -132,6 +140,8 @@ export function onWorldFeedOpen(ws: ServerWebSocket<WebSocketData>): void {
         z1: 0,
         subscribed: false,
         roster: false,
+        items: false,
+        groundItems: new Map(),
         inspectName: null,
         inspectedAt: -Infinity,
         resync: false,
@@ -143,6 +153,7 @@ export function onWorldFeedOpen(ws: ServerWebSocket<WebSocketData>): void {
         t: 'hello',
         v: WORLD_FEED_VERSION,
         inspect: true,
+        items: true,
         rev: Environment.engine.revision,
         tick: World.currentTick,
         tickMs: World.tickRate,
@@ -175,6 +186,8 @@ export function onWorldFeedMessage(ws: ServerWebSocket<WebSocketData>, message: 
         sub.subscribed = w > 0 && h > 0;
     } else if (msg.t === 'roster') {
         sub.roster = msg.on === true;
+    } else if (msg.t === 'items') {
+        sub.items = msg.on === true;
     } else if (msg.t === 'inspect') {
         if (msg.name !== null && (typeof msg.name !== 'string' || !/^[a-z0-9 _]{1,12}$/i.test(msg.name))) return;
         const name = typeof msg.name === 'string' ? msg.name.trim().replace(/_/g, ' ').toLowerCase() : null;
@@ -313,6 +326,7 @@ function cycleSubscriber(sub: Subscriber, tick: number, tickMs: number): void {
     if (reset) {
         sub.players.clear();
         sub.npcs.clear();
+        sub.groundItems.clear();
         sub.resync = false;
     }
 
@@ -332,6 +346,7 @@ function cycleSubscriber(sub: Subscriber, tick: number, tickMs: number): void {
         }
     });
 
+    const { items, removedItems } = visitGroundItems(sub);
     const removedPlayers = removeUnseen(sub.players, tick);
     const removedNpcs = removeUnseen(sub.npcs, tick);
 
@@ -339,9 +354,49 @@ function cycleSubscriber(sub: Subscriber, tick: number, tickMs: number): void {
     if (reset) msg += ',"reset":1';
     if (players.length > 0) msg += `,"p":[${players.join(',')}]`;
     if (npcs.length > 0) msg += `,"n":[${npcs.join(',')}]`;
+    if (items.length > 0) msg += `,"o":${JSON.stringify(items)}`;
+    if (removedItems.length > 0) msg += `,"ro":${JSON.stringify(removedItems)}`;
     if (removedPlayers.length > 0) msg += `,"rp":[${removedPlayers.join(',')}]`;
     if (removedNpcs.length > 0) msg += `,"rn":[${removedNpcs.join(',')}]`;
     send(sub.ws, msg + '}');
+}
+
+// Read active server objects rather than a static spawn list: drops, stack changes,
+// pickups, despawns and respawns all use the same path. Weak identity survives respawns.
+function visitGroundItems(sub: Subscriber): { items: GroundItem[]; removedItems: number[] } {
+    const current = new Map<number, GroundItem>();
+    const items: GroundItem[] = [];
+    if (sub.items) {
+        for (let level = 0; level < 4; level++) {
+            for (let x = sub.x0 & ~7; x < sub.x1; x += 8) {
+                for (let z = sub.z0 & ~7; z < sub.z1; z += 8) {
+                    const zone = World.gameMap.findZone(x, z, level);
+                    if (!zone || zone.totalObjs === 0) continue;
+                    for (const obj of zone.getAllObjsSafe()) {
+                        if (!inRect(sub, obj.x, obj.z)) continue;
+                        let id = groundItemIds.get(obj);
+                        if (id === undefined) {
+                            id = nextGroundItemId++;
+                            groundItemIds.set(obj, id);
+                        }
+                        const record = { i: id, t: obj.type, c: obj.count, x: obj.x, z: obj.z, l: obj.level };
+                        const previous = sub.groundItems.get(id);
+                        if (!previous || previous.t !== record.t || previous.c !== record.c ||
+                            previous.x !== record.x || previous.z !== record.z || previous.l !== record.l) {
+                            items.push(record);
+                        }
+                        current.set(id, record);
+                    }
+                }
+            }
+        }
+    }
+    const removedItems: number[] = [];
+    for (const id of sub.groundItems.keys()) {
+        if (!current.has(id)) removedItems.push(id);
+    }
+    sub.groundItems = current;
+    return { items, removedItems };
 }
 
 // Updates what the subscriber knows about an entity and returns its record for this tick.
