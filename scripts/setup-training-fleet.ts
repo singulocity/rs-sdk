@@ -3,11 +3,16 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const bots = [
+const bots: { name: string; role: string; module?: string }[] = [
     { name: 'BladeBram', role: 'combat' },
     { name: 'PondPiper', role: 'fishing' },
     { name: 'OreOtis', role: 'mining' },
     { name: 'EmberEtta', role: 'firemaking' },
+    { name: 'ChefCora', role: 'cooking', module: 'training-more' },
+    { name: 'FletchFinn', role: 'fletching', module: 'training-more' },
+    { name: 'WeaverWren', role: 'crafting', module: 'training-more' },
+    { name: 'SneakSage', role: 'thieving', module: 'training-more' },
+    { name: 'BoneBasil', role: 'prayer', module: 'training-more' },
 ];
 for (const bot of bots) {
     const directory = join(root, 'bots', bot.name);
@@ -27,7 +32,8 @@ for (const bot of bots) {
     writeFileSync(envPath, env);
     const routine = join(directory, 'watch.ts');
     if (!existsSync(routine)) {
-        writeFileSync(routine, "import { runTraining } from '../../scripts/training';\nawait runTraining('" + bot.role + "');\n");
+        const entry = bot.module ? 'runAdditionalTraining' : 'runTraining';
+        writeFileSync(routine, "import { " + entry + " } from '../../scripts/" + (bot.module ?? 'training') + "';\nawait " + entry + "('" + bot.role + "');\n");
     }
 }
 const stateDir = join(root, 'bots/local-watch');

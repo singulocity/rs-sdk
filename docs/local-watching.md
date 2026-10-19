@@ -57,9 +57,9 @@ Edit `bots/<name>/watch.ts` to change the bot's behavior, then use `restart` to 
 the updated routine. This launcher does not freeze the simulation or edit XP,
 inventories or world state; those are separate server/game operations.
 
-## Five-bot training fleet
+## Ten-bot training fleet
 
-Run the original bot plus four training bots:
+Run the original bot plus nine training bots:
 
 | Bot | Activity | Location |
 | --- | --- | --- |
@@ -68,14 +68,19 @@ Run the original bot plus four training bots:
 | PondPiper | Small-net fishing | Draynor shore, south of the dark wizards |
 | OreOtis | Copper/tin mining | Southeast Varrock mine |
 | EmberEtta | Firemaking; chops replacement logs | West of Lumbridge |
+| ChefCora | Cooking; catches its own fish | Draynor |
+| FletchFinn | Fletching arrow shafts | Lumbridge |
+| WeaverWren | Shearing sheep and spinning wool | Lumbridge farm/castle |
+| SneakSage | Pickpocketing men | Lumbridge |
+| BoneBasil | Burying bones | Lumbridge chicken farm |
 
-The shared routine code is in `scripts/training.ts`. Each bot has its own
+The shared routine code is in `scripts/training.ts` and `scripts/training-more.ts`. Each bot has its own
 `bots/<name>/watch.ts` entry point and separate client/controller processes.
 They keep their own skills, inventory and position. Low-HP bots eat available
 food; combat pauses at low HP when food runs out. Safe gathering can continue
 during natural healing. Fishing/mining bots drop their catches/ore when nearly full.
 
-To recreate the four extra accounts locally without committing credentials:
+To recreate the nine extra accounts locally without committing credentials:
 
 ```powershell
 bun scripts/setup-training-fleet.ts
@@ -87,7 +92,7 @@ bun scripts/setup-training-fleet.ts
 
 The extra bots are listed in `bots/local-watch/fleet.json`.
 The regular start/stop/restart/status commands include all listed bots.
-Stop ends all routines before logging out the five characters and stopping
+Stop ends all routines before logging out all ten characters and stopping
 the server. Credentials and character saves stay local.
 
 To repeat a resource sample while the bots are actively training:
@@ -101,3 +106,5 @@ and peak resident memory, private memory allocations, CPU usage, and before/afte
 skill XP. Viewer development-server children are counted as shared overhead.
 Browser/GPU usage is outside the report. These short samples are comparisons of
 this workload, not maximum fleet capacity or a linear scaling guarantee.
+
+See [Skill coverage](training-skills.md) for the 19 enabled skills and remaining training roles.
