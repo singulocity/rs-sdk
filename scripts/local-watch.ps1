@@ -1,12 +1,44 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('start', 'stop', 'restart', 'status', 'logs')]
+    [ValidateSet('help', 'start', 'stop', 'restart', 'status', 'logs')]
     [string]$Action = 'status',
     [string]$BotName,
     [string]$ViewerPath,
     [ValidateSet('engine', 'gateway', 'viewer', 'bot', 'routine', 'logout')]
     [string]$Service = 'routine'
 )
+
+if ($Action -eq 'help') {
+    Write-Host @'
+Usage: .\local.cmd <command> [options]
+
+Commands:
+  help      Show this reference.
+  status    Show services, process IDs, and ports.
+  start     Start the server, gateway, viewer, bot, and routine.
+  stop      Log out and save the bot, then stop the local setup.
+  restart   Stop the local setup, then start it again.
+  logs      Show the last 25 lines of output and errors (default: routine).
+
+Options:
+  -Service     engine | gateway | viewer | bot | routine | logout
+               Select which logs to display.
+  -BotName     Choose the bot when starting; the choice is remembered.
+  -ViewerPath  Path to your rs-world checkout; the choice is remembered.
+
+Examples:
+  .\local.cmd status
+  .\local.cmd stop
+  .\local.cmd logs -Service engine
+  .\local.cmd start -BotName KuUzmeFTw -ViewerPath C:\Users\jblac\Github\rs-world
+
+Viewer: http://localhost:3000
+Closing the browser or terminal does not stop the background services.
+Stop retries logout for up to 90 seconds if combat blocks it.
+If logout cannot complete, the server stays running to preserve progress.
+'@
+    exit 0
+}
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent

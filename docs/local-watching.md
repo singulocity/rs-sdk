@@ -4,6 +4,7 @@ This setup runs entirely on your PC. Run commands from your rs-sdk folder in
 PowerShell or Windows Terminal:
 
 ```powershell
+.\local.cmd help
 .\local.cmd status
 .\local.cmd start
 .\local.cmd stop
